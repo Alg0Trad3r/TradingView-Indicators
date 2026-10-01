@@ -1,6 +1,8 @@
 # TradingView-Indicators
 Library of TradingView indicators that I have developed myself during my time using more retail based strategies. I have used these indicators directly in the research process when developing strategies myself and with the completion of projects for non-institutional clients.
 
+Regarding the reference to the library by Forrest with OGV Tech, I was working with that company (OGV Tech) and helped developed the code that was put into the library. The library was done on his account which is why the library is imported in from his account.
+
 All of the indicators give the user the ability to change the parameters relevant to the strategy
 
 In this repository you will find these indicators:
