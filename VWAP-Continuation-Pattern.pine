@@ -1,0 +1,1101 @@
+//@version=6
+strategy(title = "VWAP Continuation Pattern V3", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type =  strategy.commission.percent, commission_value = 0.0, calc_on_order_fills = false, calc_on_every_tick = false)
+
+// |============================================================================
+// |                            IMPORTS
+// |============================================================================
+
+import forrestobnamia/OGV_Library/43 as OGV
+// Input Categories
+var string G_PERFORMANCE        = "Strategy Performance Tracker"
+var string G_STATISTICS         = "Instrument Statistics"
+var string G_TIME_TRADING       = "Trading Time Window (All Time In NY/EST)"
+var string G_RISK_MGMT          = "Risk Management: Position Sizing"
+var string G_MAX_TRADES         = "Risk Management: Max Trades Per Day"
+var string G_DIRECTION          = "Directional Bias"
+var string G_FILTER_HTF         = "Entry Filter: Higher Timeframe"
+var string G_FILTER_LEVEL       = "Entry Filter: Levels"
+var string G_EXIT_STOP_LOSS     = "Position Management: Stop Loss"
+var string G_EXIT_TAKE_PROFIT   = "Position Management: Take Profit"
+var string G_EXIT_TRIGGERS      = "Position Management: Exit Triggers"
+var string G_OVERLAYS           = "Chart Overlays"
+var string G_LABELS             = "Chart Labels"
+var string G_ATR                = "Indicator: ATR"
+var string G_SNIPER             = "Indicator: Sniper Script Values"
+var string G_MAS                = "Indicator: Moving Averages"
+var string G_TIME_PREMARKET     = "Time Window: Premarket"
+var string G_TIME_POSTMARKET    = "Time Window: Postmarket"
+var string G_TIME_OPEN          = "Time Window: Opening Range"
+var string G_TIME_CLOSE         = "Time Window: Close"
+var string G_ENTRY_TRIGGERS     = "Entry Trigger Selection"
+
+// ──────────────────────────────────────
+// 1. INPUTS
+// ──────────────────────────────────────
+atrLen          = input.int(14,  "ATR Length", display = display.none)
+pivotLen        = input.int(1,   "Pivot Look-back (bars) for Pre + Post Market", display = display.none)
+regPivotLen = input.int(3, "Pivot to look back for Regular Market", display = display.none)
+minTouches      = input.int(1,   "Min touches of pivot", display = display.none)
+atrMultOpen     = input.float(1.0, "Max distance from open (ATR ×)", display = display.none)
+rrTarget        = input.float(2.0, "R:R to move SL to BE", display = display.none)
+usePricePerc = input.bool(false, "Calculate Max Restest Distance w/ % of Price", display = display.none)
+useATRPerc = input.bool(true, "Calculate Max Restest Distance w/ % of ATR", display = display.none)
+priceRetestPerc = input.float(0.22, "Max Retest Distance (% of Price)", minval=0.01, step = 0.01, display = display.none) / 100
+ATRRetestPerc = input.float(7.0, "Max Retest Distance (% of ATR)", minval=0.01, step = 0.1, display = display.none) / 100
+maxTimeAboveVWAP = input.int(20, "Max Time Above VWAP Before Cancelling Short (Minutes)", display = display.none)
+show9EMA1M = input.bool(true, "Show 1 Minute 9 EMA", display = display.none)
+show21EMA1M = input.bool(true, "Show 1 Minute 21 EMA", display = display.none)
+show9EMA3M = input.bool(false, "Show 3 Minute 9 EMA", display = display.none)
+show21EMA3M = input.bool(false, "Show 3 Minute 21 EMA", display = display.none)
+
+useEntry1 = input.bool(true, "Use Entry Trigger 1", group = G_ENTRY_TRIGGERS, display = display.none)
+useEntry2 = input.bool(true, "Use Entry Trigger 2", group = G_ENTRY_TRIGGERS, display = display.none)
+useEntry3 = input.bool(true, "Use Entry Trigger 3", group = G_ENTRY_TRIGGERS, display = display.none)
+useEntry4 = input.bool(true, "Use Entry Trigger 4", group = G_ENTRY_TRIGGERS, display = display.none)
+useEntry5 = input.bool(true, "Use Entry Trigger 5", group = G_ENTRY_TRIGGERS, display = display.none)
+useEntry6 = input.bool(true, "Use Entry Trigger 6", group = G_ENTRY_TRIGGERS, display = display.none)
+useEntry7 = input.bool(true, "Use Entry Trigger 7", group = G_ENTRY_TRIGGERS, display = display.none)
+useEntry8 = input.bool(true, "Use Entry Trigger 8", group = G_ENTRY_TRIGGERS, display = display.none)
+
+// PERFORMANCE STATISTICS
+showDailyPerformance            = input.bool(true, "Show Daily Performance", group=G_PERFORMANCE, display=display.none)
+showAllPerformance              = input.bool(true, "Show All Performance", group=G_PERFORMANCE, display=display.none)
+performanceTablePosition        = input.enum(OGV.table_position.topRight, "Performance Tracker Position", group=G_PERFORMANCE, display=display.none)
+
+// Daily Performance Metrics
+var float dayStartEquity        = strategy.initial_capital
+var int dayStartTrades          = 0
+var int dayStartWins            = 0
+var int tradesToday             = 0
+
+// INSTRUMENT STATISTICS
+showDebugTable                  = input.bool(false, "Show Debugging Statistics", group=G_STATISTICS)
+statTablePosition               = input.enum(OGV.table_position.bottomRight, "State Table Position", display=display.none)
+debugTextSize                   = input.int(10, "Text Size", minval = 3, maxval = 20, display = display.none, group=G_LABELS)
+
+// RISK MANAGEMENT INPUTS
+// riskType = input.string("Equity %", "Risk Per Trade", options=["Fixed $", "Equity %"], group="Risk Management", display = display.none)
+// dollarRisk = input.float(1000, "Fixed $ Risk", minval=1, group="Risk Management", display = display.none)
+// equityPercentRisk = input.float(1.0, "Equity % Risk", minval=0.1, maxval=50, step=0.1, group="Risk Management", display = display.none) * 0.01
+
+// RISK MANAGEMENT (POSITION SIZING)
+riskType                        = input.enum(OGV.risk_type.percentEquity,"Risk Per Trade", group = G_RISK_MGMT, display=display.none)
+dollarRisk                      = input.int(1000, "Fixed $", group = G_RISK_MGMT, display=display.none)
+equityPercentRisk               = input.float(1, "Equity %", minval = 0.1, maxval = 50, step = 0.1, group = G_RISK_MGMT, display=display.none)*.01
+
+// MAX TRADE LIMIT
+limitDailyTrades                = input.bool(true,"Set Max Daily Trades", group = G_MAX_TRADES, display = display.none)
+maxDailyTrades                  = input.int(6,"Max Number of Trades", group = G_MAX_TRADES, display=display.none)
+
+
+// TRADE DIRECTION BIAS
+directional_bias                = input.enum(OGV.directional_bias.both,"Directional Bias", group = G_DIRECTION, display=display.none)
+
+// SHOW STOP LOSS AND TAKE PROFIT ON THE CHART
+showSLTP                        = input.bool(true, "Show TP/SL Levels On Chart", group = G_OVERLAYS, display=display.none)
+
+// STOP LOSS POSITION
+use_stop_loss                   = input.bool(true, "Use Stop Loss", group = G_EXIT_STOP_LOSS, display = display.none)
+stop_loss_type                  = input.enum(OGV.stop_loss_type.percent1,"Stop Loss Position", group = G_EXIT_STOP_LOSS, display=display.none)
+slPct                           = input.float(1, "Price %", minval = 0.1, maxval = 100, step = 0.1, group = G_EXIT_STOP_LOSS, display=display.none)*.01
+slDlr                           = input.float(1, "Fixed $", minval = 0.01, maxval = 100, step = 0.01, group = G_EXIT_STOP_LOSS, display=display.none)
+slAtr1                          = input.float(1, "Local ATR Multiplier", minval = .1, maxval = 100, step = 0.1, group = G_EXIT_STOP_LOSS, display=display.none)
+slAtr2                          = input.float(1, "HTF ATR Multiplier", minval = .05, maxval = 100, step = 0.05, group = G_EXIT_STOP_LOSS, display=display.none)
+use_strategy_stop_loss          = input.bool(true, "Use Strategy Stop Loss", group = G_EXIT_STOP_LOSS, display = display.none)
+
+
+// TAKE PROFIT POSITION
+use_take_profit                 = input.bool(false, "Use Take Profit", group = G_EXIT_TAKE_PROFIT, display = display.none)
+take_profit_type                = input.enum(OGV.take_profit_type.slMultiple,"Take Profit Position", group = G_EXIT_TAKE_PROFIT, display=display.none)
+tpMultiplier                    = input.float(1, "Stop Loss Multiplier", minval = 0.1, maxval = 100, step = 0.1, group = G_EXIT_TAKE_PROFIT, display = display.none)
+tpPct                           = input.float(1, "Price %", minval = 0.1, maxval = 100, step = 0.1, group = G_EXIT_TAKE_PROFIT, display=display.none)*.01
+tpDlr                           = input.float(1, "Fixed $", minval = 0.01, maxval = 100, step = 0.01, group = G_EXIT_TAKE_PROFIT, display=display.none)
+tpAtr1                          = input.float(1, "Local ATR Multiplier", minval = .1, maxval = 100, step = 0.1, group = G_EXIT_TAKE_PROFIT, display=display.none)
+tpAtr2                          = input.float(1, "HTF ATR Multiplier", minval = .05, maxval = 100, step = 0.05, group = G_EXIT_TAKE_PROFIT, display=display.none)
+use_strategy_take_profit          = input.bool(false, "Use Strategy Take Pofit", group = G_EXIT_TAKE_PROFIT, display = display.none)
+use3MEMACrossExit = input.bool(false, "Exit on 3-min EMA cross", display = display.none)
+use1MEMACrossExit = input.bool(true, "Exit on 1-min EMA cross", display = display.none)
+
+// ──────────────────────────────────────
+// ROBUST DAILY RESET
+// ──────────────────────────────────────
+int resetTime = 16 * 60  // 4:00 PM
+int currentTime = hour * 60 + minute
+PreMktstartTime = 4 * 60 // 4:00 AM
+PreMktendTime = 9 * 60 + 29 // 9:29 AM
+RegMktstartTime = 9 * 60 + 30
+// Pre Market Window
+bool inPreMktTradingWindow = if currentTime >= PreMktstartTime and currentTime <= PreMktendTime
+    true
+// Post-market window
+PostMktstartTime = 16 * 60      // 4:00 PM
+PostMktendTime   = 20 * 60      // 8:00 PM
+bool inPostMktTradingWindow = if currentTime >= PostMktstartTime and currentTime < PostMktendTime
+    true
+// Regular Market window
+bool isRegMarketTradingWindow = if currentTime >= RegMktstartTime and currentTime > PreMktendTime and currentTime < PostMktstartTime
+    true
+
+bool crossedResetTime = currentTime >= resetTime and (currentTime[1] < resetTime or dayofmonth != dayofmonth[1])
+var bool dailyResetDone = false
+bool needsReset = crossedResetTime and not dailyResetDone
+
+var bool newDay = false
+if needsReset
+    newDay := true
+    dailyResetDone := true
+else
+    newDay := false
+
+// Reset flag at midnight or before 9:30
+if dayofmonth != dayofmonth[1] or currentTime < resetTime
+    dailyResetDone := false
+
+//Reset Pre Market
+var bool PreMktdailyResetDone = false
+PreMktresetTime = 9 * 60 + 30
+bool PreMktcrossedResetTime = currentTime >= PreMktresetTime and (currentTime[1] < PreMktresetTime or dayofmonth != dayofmonth[1])
+bool PreMktneedsReset = PreMktcrossedResetTime and not PreMktdailyResetDone
+
+// Reset the flag when we go past midnight or before reset time
+if dayofmonth != dayofmonth[1] or currentTime < resetTime
+    dailyResetDone := false
+    PreMktdailyResetDone := false
+
+if needsReset
+    dailyResetDone := true
+
+if PreMktneedsReset
+    PreMktdailyResetDone := true
+    PreMktdailyResetDone        := true
+    dayStartEquity              := strategy.equity
+    dayStartTrades              := strategy.closedtrades
+    dayStartWins                := strategy.wintrades
+    tradesToday                 := 0
+
+
+// ──────────────────────────────────────
+// 3. PRE + POST + REG SUPPORT PIVOTS ONLY (NO RESISTANCE)
+// ──────────────────────────────────────
+var float[] preLows     = array.new_float()
+var float[] postLows    = array.new_float()
+var line[]  preLowLines = array.new_line()
+var line[]  postLowLines = array.new_line()
+var float[] regHighs = array.new_float()
+var line[] regHighsLines = array.new_line()
+
+if newDay
+    array.clear(preLows)
+    array.clear(postLows)
+    for ln in preLowLines
+        line.delete(ln)
+    for ln in postLowLines
+        line.delete(ln)
+    array.clear(preLowLines)
+    array.clear(postLowLines)
+    array.clear(regHighs)
+    for ln in regHighsLines
+        line.delete(ln)
+
+// CALL PIVOT LOWS EVERY BAR
+pl = ta.pivotlow (low , pivotLen, pivotLen)
+pivotHigh = ta.pivothigh(high, regPivotLen, 0)
+
+if inPreMktTradingWindow
+    // LOW
+    if not na(pl)
+        duplicate = false
+        if array.size(preLows) > 0
+            for i = 0 to array.size(preLows) - 1
+                if math.abs(array.get(preLows, i) - pl) <= syminfo.mintick * 2
+                    duplicate := true
+        if not duplicate
+            newLine = line.new(bar_index, pl, bar_index + 1, pl, extend=extend.right, color=color.orange, width=1)
+            array.push(preLows, pl)
+            array.push(preLowLines, newLine)
+
+// ————————————————————————
+// POST-MARKET PIVOTS
+// ————————————————————————
+if inPostMktTradingWindow
+    // LOW
+    if not na(pl)
+        duplicate = false
+        if array.size(postLows) > 0
+            for i = 0 to array.size(postLows) - 1
+                if math.abs(array.get(postLows, i) - pl) <= syminfo.mintick * 2
+                    duplicate := true
+        if not duplicate
+            newLine = line.new(bar_index, pl, bar_index + 1, pl, extend=extend.right, color=color.blue, width=1)
+            array.push(postLows, pl)
+            array.push(postLowLines, newLine)
+
+// ————————————————————————
+// REGULAR-MARKET PIVOTS
+// ————————————————————————
+if isRegMarketTradingWindow
+    // HIGH
+    if not na(pivotHigh)
+        duplicate = false
+        array.push(regHighs, pivotHigh)
+        // Debugging Drawings
+        // if array.size(regHighs) > 0
+        //     for i = 0 to array.size(regHighs) - 1
+                //newLine = line.new(bar_index, pivotHigh, bar_index + 1, pivotHigh, extend=extend.right, color=color.teal, width=1)
+                //array.push(regHighsLines, newLine)
+
+// Deleting the Pre and Post Low Lines at the open
+if currentTime == PreMktendTime or currentTime == PreMktendTime + 1
+    for newLine in postLowLines
+        line.delete(newLine)
+if currentTime == PreMktendTime or currentTime == PreMktendTime + 1
+    for newLine in preLowLines
+        line.delete(newLine)
+
+// ── DEBUG: Plot first pivot from each session (SAFE) ──
+//float debugPreLow   = array.size(preLows)   > 0 ? array.get(preLows,   0) : na
+//float debugPostLow  = array.size(postLows)  > 0 ? array.get(postLows,  0) : na
+
+// plot(debugPreHigh,  "Pre-Market High",  color=color.blue,   style=plot.style_circles, linewidth=1)
+// plot(debugPreLow,   "Pre-Market Low",   color=color.maroon, style=plot.style_circles, linewidth=1)
+// plot(debugPostHigh, "Post-Market High", color=color.aqua,   style=plot.style_circles, linewidth=1)
+// plot(debugPostLow,  "Post-Market Low",  color=color.orange, style=plot.style_circles, linewidth=1)
+
+// ──────────────────────────────────────
+// 4. DAILY OPEN & ATR
+// ──────────────────────────────────────
+var float openPrice = na
+var float daily_atr = math.round(request.security(syminfo.tickerid, "1D", ta.atr(atrLen)[1], lookahead = barmerge.lookahead_on), 2)
+atr = ta.atr(atrLen)
+
+
+// ──────────────────────────────────────
+// 5. FILTER LEVELS WITHIN 1 ATR OF OPEN (PRE + POST) — 100% WORKING
+// ──────────────────────────────────────
+var float[] validSupLevels = array.new_float()
+var line[] validSupLines = array.new_line()
+//var float[] validResLevels = array.new_float()
+
+// ──────────────────────────────────────
+// 5.1 FILTER LEVELS PRE + POST — ONLY AT 9:30
+// ──────────────────────────────────────
+openATR = math.round(request.security(syminfo.tickerid, "1D", ta.atr(atrLen)[1], lookahead = barmerge.lookahead_on), 2)
+if currentTime == PreMktendTime + 1
+    openPrice := open
+    daily_atr  := openATR
+    //array.clear(validSupLevels)
+
+    // SUPPORT: preLows + postLows
+    if array.size(preLows) > 0 and currentTime == RegMktstartTime
+        for i = 0 to array.size(preLows) - 1
+            lvl = array.get(preLows, i)
+            if math.abs(openPrice - lvl) <= daily_atr * atrMultOpen
+                array.push(validSupLevels, lvl)
+    if array.size(postLows) > 0 and currentTime == RegMktstartTime 
+        for i = 0 to array.size(postLows) - 1
+            lvl = array.get(postLows, i)
+            if math.abs(openPrice - lvl) <= daily_atr * atrMultOpen
+                array.push(validSupLevels, lvl)
+
+// Plot first valid support
+// float debugSupLevel = array.size(validSupLevels) > 0 ? array.get(validSupLevels, 0) : na
+// plot(debugSupLevel, "Valid Support", color=color.green, style=plot.style_circles, force_overlay = true)
+
+// ──────────────────────────────────────
+// 6. LINE ARRAYS (MUST BE DECLARED)
+// ──────────────────────────────────────
+var line[] supLines = array.new_line()
+var line[] resLines = array.new_line()
+
+// ──────────────────────────────────────
+// 7. DRAW SUPPORT LINES
+// ──────────────────────────────────────
+if array.size(validSupLevels) > 0 and currentTime >= PreMktendTime and currentTime <= PreMktendTime + 9
+    for i = 0 to array.size(validSupLevels) - 1
+        lvl = array.get(validSupLevels, i)
+        ln = line.new(x1 = bar_index, y1 = lvl, x2 = bar_index + 1, y2 = lvl, extend = extend.right, color = color.green, style = line.style_dashed, width = 1)
+        array.push(validSupLines, ln)
+        if currentTime == PreMktendTime + 9
+            for ln in validSupLines
+                line.delete(ln) 
+
+// ──────────────────────────────────────
+// 8. DRAW RESISTANCE LINES
+// ──────────────────────────────────────
+// if array.size(validResLevels) > 0
+//     for i = 0 to array.size(validResLevels) - 1
+//         lvl = array.get(validResLevels, i)
+//         ln = line.new(x1 = bar_index, y1 = lvl, x2 = bar_index + 1, y2 = lvl, extend = extend.right, color = color.red, style = line.style_dashed, width = 1)
+//         array.push(resLines, ln)
+
+if newDay
+    for ln in validSupLines
+        line.delete(ln)
+    array.clear(validSupLevels)
+    array.clear(validSupLines)
+
+// ──────────────────────────────────────
+// 7. VWAP + MAX RETEST DISTANCE
+// ──────────────────────────────────────
+float vwapVal = ta.vwap(hlc3)
+
+// ──────────────────────────────────────
+// 7.1 MAX RETEST DISTANCE CALC
+// ──────────────────────────────────────
+if usePricePerc
+    useATRPerc := false
+float maxRetestDist = usePricePerc ? close * priceRetestPerc : daily_atr * ATRRetestPerc
+if useATRPerc 
+    usePricePerc := false
+maxRetestDist := useATRPerc ? daily_atr * ATRRetestPerc : close * priceRetestPerc
+// ──────────────────────────────────────
+// 8. STATE TRACKING
+// ──────────────────────────────────────
+var bool   broke0930   = false
+var float  breakBar    = na
+var bool   retestOk    = false
+var int    retestBar   = na
+var float  retestHigh  = na
+var bool   enterShort  = false
+float  entryLevel  = na
+var float  stopLoss    = na
+var float  takeProfit  = na
+var int    positionSize = 0
+var bool emaCrossedUp3M = false
+var bool emaCrossedDown3M = false
+var bool emaCrossedUp1M = false
+var bool emaCrossedDown1M = false
+var bool supBreakCheck1 = false
+var bool supBreakCheck2 = false
+var bool supBreakCheck3 = false
+var bool supBreakCheck4 = false
+var bool retestCheck1 = false
+var bool retestCheck2 = false
+var bool retestCheck3 = false
+var bool retestCheck4 = false
+var bool retestCheck5 = false
+var bool retestCheck6 = false
+var bool retestCheck7 = false
+var bool retestCheck8 = false
+var bool retestCheck9 = false
+var bool retestCheck10 = false
+var bool entryCheck1 = false
+var bool entryCheck2 = false
+var bool entryCheck3 = false
+var bool entryCheck4 = false
+var bool entryCheck5 = false
+var bool entryCheck6 = false
+var bool entryCheck7 = false
+var bool entryCheck8 = false
+var bool filterConditions = false
+var bool maxTradesFilter  = false
+var int  vwapAboveCount = 0          // Counts consecutive bars above VWAP
+var bool vwapAboveMinCheck = false      // True = price has been above VWAP for min greater than user settings → BLOCK SHORT
+var int  vwapAboveBar = na
+
+if newDay
+    broke0930  := false
+    breakBar   := na
+    retestOk   := false
+    retestBar  := na
+    retestHigh := na
+    enterShort := false
+    entryLevel := na
+    stopLoss   := na
+    takeProfit := na
+    positionSize := 0
+    emaCrossedUp3M := false
+    emaCrossedDown3M := false
+    emaCrossedUp1M := false
+    emaCrossedDown1M := false
+    supBreakCheck1 := false
+    supBreakCheck2 := false
+    supBreakCheck3 := false
+    supBreakCheck4 := false
+    retestCheck1 := false
+    retestCheck2 := false
+    retestCheck3 := false
+    retestCheck4 := false
+    retestCheck5 := false
+    retestCheck6 := false
+    retestCheck7 := false
+    retestCheck8 := false
+    retestCheck9 := false
+    retestCheck10 := false
+    entryCheck1 := false
+    entryCheck2 := false
+    entryCheck3 := false
+    entryCheck4 := false
+    entryCheck5 := false
+    entryCheck6 := false
+    entryCheck7 := false
+    entryCheck8 := false
+    maxRetestDist := na
+    filterConditions := false
+    maxTradesFilter  := false
+    vwapAboveCount := 0
+    vwapAboveMinCheck := false
+    vwapAboveBar := na
+
+float[] validVWAPLevels = array.new_float()
+var line[] validVWAPLevelLines = array.new_line()
+
+if newDay
+    // Clear pivot arrays
+    for ln in preLowLines
+        line.delete(ln)
+    array.clear(preLowLines)
+
+    // Clear support/resistance
+    for ln in supLines
+        line.delete(ln)
+    for ln in resLines
+        line.delete(ln)
+    array.clear(supLines)
+    array.clear(resLines)
+
+    // Clear Levels near VWAP
+    for ln in validVWAPLevelLines
+        line.delete(ln)
+    array.clear(validVWAPLevels)
+
+// ──────────────────────────────────────
+// VWAP ABOVE FILTER — BLOCK SHORT IF PRICE STAYED ABOVE VWAP FOR GREATER THAN USER DESIRED MINUTES
+// ──────────────────────────────────────
+oneMinClose = request.security(syminfo.tickerid, "1", close)
+// Count consecutive 1-minute bars where close > VWAP
+if oneMinClose > vwapVal[0]
+    vwapAboveCount += 1
+    vwapAboveMinCheck := vwapAboveCount >= maxTimeAboveVWAP
+if (oneMinClose[1] > vwapVal[1] and oneMinClose[0] < vwapVal[0]) or close < vwapVal[0]
+    vwapAboveCount := 0
+    vwapAboveMinCheck := false
+if vwapAboveMinCheck
+    vwapAboveBar := bar_index
+
+// Set flag when consecutive minutes above VWAP is greater than value user sets while price is less than VWAP
+if close < vwapVal[0] and (bar_index == vwapAboveBar + 1 or bar_index == vwapAboveBar + 2 or bar_index == vwapAboveBar + 3)// or bar_index == vwapAboveBar + 4 or bar_index == vwapAboveBar + 5 or bar_index == vwapAboveBar + 6)
+    vwapAboveMinCheck := true
+
+// 8.1 — VALID VWAP LEVEL CHECK
+if array.size(validSupLevels) > 0 and isRegMarketTradingWindow
+    for i = 0 to array.size(validSupLevels) - 1
+        lvl = array.get(validSupLevels, i)
+        if lvl > (vwapVal[0] - maxRetestDist) and lvl < (vwapVal[0] + maxRetestDist)// and lvl < vwapVal[0]
+            array.push(validVWAPLevels, lvl)
+            if array.size(validVWAPLevels) > 0
+                for l = -1 to array.size(validVWAPLevels) - 1
+                    validLevel = array.get(validVWAPLevels, l)
+                    entryLevel := validLevel
+                    // ln = line.new(x1 = bar_index, y1 = validLevel, x2 = bar_index + 1, y2 = validLevel, extend = extend.right, color = color.lime, style = line.style_dashed, width = 1)
+                    // array.push(validVWAPLevelLines, ln)
+                    break
+    // 8.2 — BREAK OF LEVEL
+                if array.size(validVWAPLevels) > 0
+                    if open[1] > entryLevel and close[1] < entryLevel
+                        supBreakCheck1 := true
+                    else if open > entryLevel and close < entryLevel
+                        supBreakCheck2 := true
+                    else if open[1] > entryLevel and close < entryLevel
+                        supBreakCheck3 := true
+                    else if open[2] > entryLevel and close[1] < entryLevel and close < entryLevel
+                        supBreakCheck4 := true
+                    if supBreakCheck1 or supBreakCheck2 or supBreakCheck3 or supBreakCheck4
+                        broke0930  := true
+                        breakBar   := close
+    //broke0930 := false
+
+
+// ──────────────────────────────────────
+// 8.2 — RETEST: REJECTION FROM BELOW OR ABOVE
+// ──────────────────────────────────────
+if broke0930 and bar_index > breakBar and isRegMarketTradingWindow
+    if open[1] < vwapVal[1] or open[1] < entryLevel and open < close
+        retestCheck1 := true 
+    if open < vwapVal and open < entryLevel and close > vwapVal[0] and close > entryLevel and close < vwapVal + maxRetestDist and close > vwapVal - (maxRetestDist)
+        retestCheck2 := true 
+    if open[1] < vwapVal[1] and open[1] < entryLevel and high > vwapVal and high > entryLevel and high < vwapVal + maxRetestDist and close > vwapVal - (maxRetestDist)
+        retestCheck3 := true 
+    if open[1] < vwapVal[1] and math.abs(vwapVal[0] - breakBar) > math.abs(vwapVal[0] - close)
+        retestCheck4 := true 
+    // if open[1] < vwapVal[1] and math.abs(vwapVal[0] + breakBar) > math.abs(vwapVal[0] + close) 
+    //     retestCheck5 := true
+    if open < vwapVal and open < entryLevel and high > vwapVal and high > entryLevel and high < vwapVal + maxRetestDist
+        retestCheck6 := true
+        if open >= vwapVal[0] and open <= entryLevel and open < vwapVal + maxRetestDist and open > entryLevel - (maxRetestDist / 4)
+            retestCheck7 := true 
+        if open[1] < entryLevel and open >= entryLevel and open < vwapVal[0] and high > vwapVal[0] and high < vwapVal + maxRetestDist and close > vwapVal[0] - maxRetestDist
+            retestCheck8 := true
+            if open[1] < entryLevel and close[1] > entryLevel[1] and high[1] < entryLevel + maxRetestDist
+                retestCheck9 := true 
+            if open[1] < vwapVal[1] and open[1] < entryLevel and close[1] > vwapVal[1] and close[1] > entryLevel and close[1] < vwapVal[1] + maxRetestDist and close > vwapVal[1] - (maxRetestDist) 
+                retestCheck10 := true
+    if retestCheck1 or retestCheck2 or retestCheck3 or retestCheck4 or retestCheck5 or retestCheck6 or retestCheck7 or retestCheck8 or retestCheck9 or retestCheck10
+        retestOk   := true
+        retestBar  := bar_index
+        retestHigh := high
+        //retestCheck1 := false
+
+// 8.3 — RED CANDLE/ENTRY TRIGGER
+if retestOk and not enterShort and isRegMarketTradingWindow//bar_index == retestBar + 1 or bar_index == retestBar + 2 and 
+    if useEntry1 and open < vwapVal[0] and close < open and (bar_index[1] == retestBar or bar_index[2] == retestBar) and close > vwapVal[0] - maxRetestDist
+        entryCheck1 := true 
+    if useEntry2 and close < entryLevel and close > entryLevel - maxRetestDist and close < vwapVal[0] and close > vwapVal[0] - maxRetestDist
+        entryCheck2 := true 
+    if useEntry3 and close[1] > open[1] and (high[1] >= vwapVal[1] or high >= vwapVal[0]) and close < vwapVal[0]
+        entryCheck3 := true
+    if useEntry4 and (open[1] < vwapVal[1]) and (high >= vwapVal[0] and close < vwapVal[0])
+        entryCheck4 := true
+    if useEntry5 and close < low[1] and close < open and close < vwapVal[0] and close < entryLevel and close > vwapVal[0] - maxRetestDist and close < vwapVal[0] + maxRetestDist
+        entryCheck5 := true
+    if useEntry6 and high[1] >= vwapVal[1] and (close < entryLevel or close < vwapVal[0])
+        entryCheck6 := true
+    if useEntry7 and (open[1] > vwapVal[1] and high > vwapVal[0] and close < vwapVal[0])
+        entryCheck7 := true
+    if useEntry8 and open[1] < vwapVal[1] and high >= vwapVal and (close < entryLevel or close < vwapVal[0])
+        entryCheck8 := true
+if entryCheck1 or entryCheck2 or entryCheck3 or entryCheck4 or entryCheck5 or entryCheck6 or entryCheck7 or entryCheck8
+    enterShort := true
+    //Reset
+    retestOk := false
+    broke0930 := false
+
+// Final check to check if all the conditions are true
+if close > vwapVal[0] + maxRetestDist or close < vwapVal[0] - maxRetestDist or close > vwapVal[0] or close > open or vwapAboveMinCheck or currentTime > 15 * 60 + 30 or strategy.position_size < 0
+    enterShort := false
+
+//Stop Loss Reset to ensure new recalculation
+if enterShort
+    stopLoss := na
+
+// ──────────────────────────────────────
+// 9. POSITION SIZING + ENTRY (OGV LOGIC)
+// ──────────────────────────────────────
+// Trade Management Parameters
+var float entryPrice            = na
+var int entryBarNumber          = na
+var string entryType            = na
+var string entryComment         = na
+// |============================================================================
+// |                            POSITION ENTRY + ENTRY FILTERS
+// |============================================================================
+
+
+if isRegMarketTradingWindow and strategy.position_size == 0
+
+    // ----------------------------------------------------------------------------
+    //                          ENTRY FILTERS RESET
+    // ----------------------------------------------------------------------------
+
+    filterConditions := false
+    maxTradesFilter := true
+
+
+    // ----------------------------------------------------------------------------
+    //                          MAX TRADES
+    // ----------------------------------------------------------------------------
+
+    if limitDailyTrades and (strategy.closedtrades - dayStartTrades) >= maxDailyTrades
+        maxTradesFilter := false
+
+
+    // ----------------------------------------------------------------------------
+    //                          FINAL FILTERS CHECK
+    // ----------------------------------------------------------------------------
+
+    filterConditions := maxTradesFilter and true
+
+    if isRegMarketTradingWindow and filterConditions
+    
+        // Check to make sure no conflicting signals
+        // if enterPositionLong and enterPositionShort
+        //     enterPositionLong   := false
+        //     enterPositionShort  := false
+
+        // GET TOTAL AMOUNT OF DOLLAR RISK ON THE TRADE
+        totalTradeRisk = riskType == OGV.risk_type.fixedDollar ? dollarRisk : math.round(strategy.equity*equityPercentRisk,2)
+
+        // ----------------------------------------------------------------------------
+        //               *****************BG STOP*****************
+        // ----------------------------------------------------------------------------
+        stopLoss := na 
+        if use_strategy_stop_loss and array.size(regHighs) > 0
+            for i = -1 to array.size(regHighs) - 1
+                //pivotHigh := array.get(regHighs, i)
+                pivotHigh := math.max(array.get(regHighs, i), array.get(regHighs, i + 0))
+                stopLoss := pivotHigh
+            if stopLoss <= close
+                stopLoss := math.max(high[1], high[2], high[3])
+        positionSize := math.round(totalTradeRisk / math.abs(stopLoss - close))
+
+        // CALCULATE POSITION SIZE BASED ON STOP SETTING
+        if stop_loss_type == OGV.stop_loss_type.percent1
+            positionSize := math.round(totalTradeRisk / (close * slPct))
+        else if stop_loss_type == OGV.stop_loss_type.dollar1
+            positionSize := math.round(totalTradeRisk / slDlr)
+        // NOTE: ATR will fluctuate the risk as volatility of the instrument moves the stop
+        else if stop_loss_type == OGV.stop_loss_type.atr1
+            positionSize := math.round(totalTradeRisk / (atr * slAtr1))
+        else if stop_loss_type == OGV.stop_loss_type.atr2
+            positionSize := math.round(totalTradeRisk / (daily_atr * slAtr2))
+        else if use_strategy_stop_loss
+            positionSize := math.round(totalTradeRisk / (stopLoss - close))
+        else
+            positionSize := 0
+
+
+        // ENTER LONG POSITION
+        // if enterPositionLong and (directional_bias == OGV.directional_bias.both or directional_bias == OGV.directional_bias.long)
+        //     strategy.entry("Long", strategy.long, positionSize, comment = entryComment)
+        //     enterPositionLong := false
+            
+        // ENTER SHORT POSITION
+        if enterShort and (directional_bias == OGV.directional_bias.both or directional_bias == OGV.directional_bias.short)
+            strategy.entry("Short", strategy.short, positionSize, comment = entryComment)
+            entryCheck1 := false
+            entryCheck2 := false
+            entryCheck3 := false
+            entryCheck4 := false
+            entryCheck5 := false
+            entryCheck6 := false
+            entryCheck7 := false
+            entryCheck8 := false
+            enterShort := false
+            stopLoss := na
+
+
+// |============================================================================
+// |                            POSITION MANAGEMENT
+// |============================================================================
+
+if strategy.position_size != 0 //and na(stopLoss)
+
+    // GET ENTRY PRICE TO BASE LEVELS ON
+    entryPrice := strategy.opentrades.entry_price(strategy.opentrades-1)
+
+    // ----------------------------------------------------------------------------
+    //                          STOP LOSS
+    // ----------------------------------------------------------------------------
+
+    if use_stop_loss
+        // USING REGULAR STOP LOSS OF STRATEGY
+        if use_strategy_stop_loss and array.size(regHighs) > 0 and na(stopLoss)
+            for i = -1 to array.size(regHighs) - 1
+                //pivotHigh := array.get(regHighs, i)
+                pivotHigh := math.max(array.get(regHighs, i), array.get(regHighs, i + 0))
+                stopLoss := pivotHigh
+            if stopLoss <= close
+                stopLoss := math.max(high[1], high[2], high[3])
+
+        else if use_strategy_stop_loss and array.size(regHighs) <= 0 and na(stopLoss)
+            stopLoss := math.max(high[1], high[2], high[3])
+
+        // Set Stop To % of Underlying Stock Price
+        else if stop_loss_type == OGV.stop_loss_type.percent1 and not use_strategy_stop_loss
+            if strategy.position_size > 0
+                stopLoss := entryPrice - (entryPrice * slPct)
+            if strategy.position_size < 0
+                stopLoss := entryPrice + (entryPrice * slPct)
+        
+        // Set Stop To $ of Underlying Stock Price
+        else if stop_loss_type == OGV.stop_loss_type.dollar1 and not use_strategy_stop_loss
+            if strategy.position_size > 0
+                stopLoss := entryPrice - slDlr
+            if strategy.position_size < 0
+                stopLoss := entryPrice + slDlr
+
+        // Set Stop to LTF ATR
+        else if stop_loss_type == OGV.stop_loss_type.atr1 and not use_strategy_stop_loss
+            if strategy.position_size > 0
+                stopLoss := entryPrice - (atr * slAtr1)
+            if strategy.position_size < 0
+                stopLoss := entryPrice + (atr * slAtr1)
+
+        // Set Stop to HTF ATR
+        else if stop_loss_type == OGV.stop_loss_type.atr2 and not use_strategy_stop_loss
+            if strategy.position_size > 0
+                stopLoss := entryPrice - (daily_atr * slAtr2)
+            if strategy.position_size < 0
+                stopLoss := entryPrice + (daily_atr * slAtr2)
+        
+
+    // ----------------------------------------------------------------------------
+    //                          TAKE PROFIT
+    // ----------------------------------------------------------------------------
+
+    if use_take_profit
+        // Use Take Profit for the strategy
+        // if use_strategy_take_profit
+
+        // Set Take Profit To Multiple of the Stop Loss
+        if take_profit_type == OGV.take_profit_type.slMultiple and not use_strategy_take_profit
+            // code here to set stop to % of underlying Move
+            if strategy.position_size > 0
+                takeProfit := entryPrice + math.abs(entryPrice - stopLoss) * tpMultiplier
+            if strategy.position_size < 0
+                takeProfit := entryPrice - math.abs(entryPrice - stopLoss) * tpMultiplier
+
+        // Set Take Profit To % of Underlying Stock Price
+        else if take_profit_type == OGV.take_profit_type.percent1 and not use_strategy_take_profit
+            // code here to set stop to % of underlying Move
+            if strategy.position_size > 0
+                takeProfit := entryPrice + (entryPrice * tpPct)
+            if strategy.position_size < 0
+                takeProfit := entryPrice - (entryPrice * tpPct)
+
+        // Set Take Profit To $ of Underlying Stock Price
+        else if take_profit_type == OGV.take_profit_type.dollar1 and not use_strategy_take_profit
+            if strategy.position_size > 0
+                takeProfit := entryPrice + tpDlr
+            if strategy.position_size < 0
+                takeProfit := entryPrice - tpDlr
+
+        // Set Take Profit to LTF ATR
+        else if take_profit_type == OGV.take_profit_type.atr1 and not use_strategy_take_profit
+            if strategy.position_size > 0
+                takeProfit := entryPrice + (atr * tpAtr1)
+            if strategy.position_size < 0
+                takeProfit := entryPrice - (atr * tpAtr1)
+
+        // Set Take Profit to HTF ATR
+        else if take_profit_type == OGV.take_profit_type.atr2 and not use_strategy_take_profit
+            if strategy.position_size > 0
+                takeProfit := entryPrice + (daily_atr * tpAtr2)
+            if strategy.position_size < 0
+                takeProfit := entryPrice - (daily_atr * tpAtr2)
+
+    // Reset
+    entryCheck1 := false
+    entryCheck2 := false
+    entryCheck3 := false
+    entryCheck4 := false
+    entryCheck5 := false
+    entryCheck6 := false
+    entryCheck7 := false
+    entryCheck8 := false
+    enterShort := false
+    broke0930  := false
+    retestOk := false
+
+    // ----------------------------------------------------------------------------
+    //                          ACTIVE POSITION MANAGEMENT
+    // ----------------------------------------------------------------------------
+
+// MANAGE STOP LOSS
+if strategy.position_size == 0
+    stopLoss := na
+
+// MANAGE LONG POSITION
+if strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry="Long", stop=stopLoss, limit=takeProfit)
+
+// MANAGE SHORT POSITION
+else if strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry="Short", stop=stopLoss, limit=takeProfit)
+    enterShort := false
+    array.clear(regHighs)
+    
+
+
+// ──────────────────────────────────────
+// 10. BREAKEVEN AT 1:2 R:R
+// ──────────────────────────────────────
+// if strategy.position_size < 0 and not na(stopLoss)
+//     entryPrc = strategy.position_avg_price
+//     risk = entryPrc - stopLoss
+//     beTarget = entryPrc - (risk * rrTarget)  // 2R
+//     if low <= beTarget
+//         strategy.exit("BE", from_entry="Short", stop=entryPrc, comment = "BE @ 1:2")
+
+
+// ──────────────────────────────────────
+// 11. EMA EXIT
+// ──────────────────────────────────────
+ema9_3  = request.security(syminfo.tickerid, "3", ta.ema(close, 9))
+ema21_3 = request.security(syminfo.tickerid, "3", ta.ema(close, 21))
+ema9  = request.security(syminfo.tickerid, "1", ta.ema(close, 9))
+ema21 = request.security(syminfo.tickerid, "1", ta.ema(close, 21))
+var float crossCandleDown3M = na
+var float crossCandleDown1M = na
+var float crossCandleUp3M = na
+var float crossCandleUp1M = na
+bool crossUnder3M = if ta.crossunder(ema9_3, ema21_3) 
+    true
+bool crossOver3M = if ta.crossover(ema9_3, ema21_3)
+    true
+bool crossUnder1M = if ta.crossunder(ema9, ema21)
+    true
+bool crossOver1M = if ta.crossover(ema9, ema21)
+    true
+// 11.1 TRACKING STATE OF EMA CROSSING
+if ema9_3 > ema21_3 or crossOver3M
+    emaCrossedUp3M := true
+if ema9 > ema21 or crossOver1M
+    emaCrossedUp1M := true
+if ema9_3 < ema21_3 or crossUnder3M
+    emaCrossedDown3M := true
+if ema9 < ema21 or crossUnder1M
+    emaCrossedDown1M := true
+if ema9_3 < ema21_3 or crossUnder3M
+    crossCandleDown3M := bar_index
+if ema9 < ema21 or crossUnder1M
+    crossCandleDown1M := bar_index
+if ema9_3 > ema21_3 or crossOver3M
+    crossCandleUp3M := bar_index
+if ema9 > ema21 or crossOver1M
+    crossCandleUp1M := bar_index
+
+if use3MEMACrossExit and strategy.position_size < 0 and not(emaCrossedUp3M) and bar_index != crossCandleUp3M
+    use1MEMACrossExit := false
+    if ta.crossover(ema9_3, ema21_3)
+        strategy.close_all(comment="3-min EMA Exit")
+        // Reset
+        enterShort := false
+        stopLoss := na
+        broke0930  := false
+        retestOk := false
+
+if use3MEMACrossExit and strategy.position_size < 0 and bar_index == crossCandleDown3M + 1 
+    use1MEMACrossExit := false
+    strategy.close_all(comment="3-min EMA Exit")
+    // Reset
+    enterShort := false
+    stopLoss := na
+    broke0930  := false
+    retestOk := false
+
+if use1MEMACrossExit and strategy.position_size < 0 and not(emaCrossedUp1M) and bar_index != crossCandleUp1M
+    use3MEMACrossExit := false
+    if ta.crossover(ema9, ema21)
+        strategy.close_all(comment="1-min EMA Exit")
+        // Reset
+        enterShort := false
+        stopLoss := na
+        broke0930  := false
+        retestOk := false
+    
+if use1MEMACrossExit and strategy.position_size < 0 and bar_index == crossCandleDown1M + 1 
+    use3MEMACrossExit := false
+    strategy.close_all(comment="1-min EMA Exit")
+    // Reset
+    enterShort := false
+    stopLoss := na
+    broke0930  := false
+    retestOk := false
+
+
+if currentTime == 15 * 60 + 58 and strategy.position_size < 0
+    strategy.close_all(comment = "End Of Day Exit")
+    // Reset
+    enterShort := false
+    broke0930  := false
+    retestOk := false
+
+// |============================================================================
+// |                            FINAL RESET
+// |============================================================================
+if newDay
+    crossCandleDown3M := na
+    crossCandleDown1M := na
+    crossUnder3M := false
+    crossOver3M := false
+    crossUnder1M := false
+    crossOver1M := false
+    entryLevel := na
+
+// |============================================================================
+// |                            STRATEGY PERFORMANCE
+// |============================================================================
+
+// ALL TRADES
+int totalTrades         = strategy.closedtrades
+float totalWinRate      = strategy.wintrades / totalTrades * 100
+float totalPnL          = strategy.netprofit
+float totalPnLPct       = strategy.netprofit_percent
+float totalAvgTrade     = strategy.avg_trade
+float totalAvgTradePct  = strategy.avg_trade_percent
+float profitFactor      = strategy.grossprofit / strategy.grossloss
+
+// CLOSED TRADES TODAY
+int todayTrades         = strategy.closedtrades - dayStartTrades
+int todayWins           = strategy.wintrades - dayStartWins
+float todayPnL          = strategy.equity - dayStartEquity
+float todayPnLPct       = dayStartEquity > 0 ? (todayPnL / dayStartEquity) * 100 : 0
+float todayWinRate      = todayTrades > 0 ? (todayWins / todayTrades) * 100 : 0
+float todayAvgTrade     = todayPnL / todayTrades
+float todayAvgTradePct  = todayAvgTrade / dayStartEquity * 100
+
+// OPEN TRADES NOW
+int openTrades          = strategy.opentrades
+float openPnL           = openTrades == 0 ? 0 : strategy.openprofit
+float openPnLPct        = openTrades == 0 ? 0 : (openPnL / strategy.equity)*100
+
+
+// ──────────────────────────────────────
+// 12. VISUALS + TABLE FOR DEBUGGING
+// ──────────────────────────────────────
+plot(vwapVal, "VWAP", color=color.blue, linewidth=1, display = display.none + display.pane)
+plot(vwapVal + maxRetestDist, "Level", color=color.new(color.blue,50), style=plot.style_linebr, linewidth = 1, display = display.none + display.pane)
+plot(vwapVal - maxRetestDist, "Level", color=color.new(color.blue,50), style=plot.style_linebr, linewidth = 1, display = display.none + display.pane)
+
+plot(show9EMA1M ? ema9 : na, title = "1 Minute 9 EMA", color =  color.red, linewidth = 1, display = display.none + display.pane)
+plot(show21EMA1M ? ema21 : na, title = "1 Minute 21 EMA", color =  color.green, linewidth = 1, display = display.none + display.pane)
+plot(show9EMA3M ? ema9_3 : na, title = "3 Minute 9 EMA", color = color.new(color.red,30), linewidth = 1, display = display.none + display.pane)
+plot(show21EMA3M ? ema21_3 : na, title = "3 Minute 21 EMA", color = color.new(color.green,30), linewidth = 1, display = display.none + display.pane)
+
+// Plot Stop Loss and Take Profit Levels
+plot(strategy.position_size != 0 and showSLTP ? stopLoss : na, "Stop Loss", color=color.red, style=plot.style_circles, linewidth=2, display = display.none + display.pane)
+plot(strategy.position_size != 0 and showSLTP ? takeProfit : na, "Take Profit", color=color.green, style=plot.style_circles, linewidth=2, display = display.none + display.pane)
+
+// plotshape(breakBar, "Break", shape.triangledown, location.belowbar, color.red, display = display.none + display.pane)
+// plotshape(retestBar, "Retest", shape.triangleup, location.abovebar, color.lime, display = display.none + display.pane)
+// plotshape(enterShort, "Engulfing", shape.diamond, location.belowbar, color.fuchsia, display = display.none + display.pane)
+plot(entryLevel, "Level", color=color.purple, style=plot.style_linebr, linewidth = 2, display = display.none + display.pane)
+
+// |============================================================================
+// |                            TABLES
+// |============================================================================
+
+    // ----------------------------------------------------------------------------
+    //                          PERFORMANCE TABLE
+    // ----------------------------------------------------------------------------
+
+// TABLE POSITION
+perfTablePos = performanceTablePosition == OGV.table_position.topLeft ? position.top_left : 
+         performanceTablePosition == OGV.table_position.topRight ? position.top_right : 
+         performanceTablePosition == OGV.table_position.bottomLeft ? position.bottom_left :
+         position.bottom_right  
+
+// TABLE CREATION
+var table performanceTable = table.new(perfTablePos, 20, 20, bgcolor=color.white, frame_color = color.black, frame_width = 2, border_color = color.black,  border_width=2)
+
+
+// COLOR CODING
+color totalPnLColor = totalPnL > 0 ? color.green : totalPnL < 0 ? color.red : color.gray
+color totalWinColor = totalWinRate >= 60 ? color.green : totalWinRate >= 40 ? color.black : color.red
+color todayPnLColor = todayPnL > 0 ? color.green : todayPnL < 0 ? color.red : color.gray
+color todayWinColor = todayWinRate >= 60 ? color.green : todayWinRate >= 40 ? color.black : color.red
+color openPnLColor = openPnL > 0 ? color.green : openPnL < 0 ? color.red : color.gray
+
+    // ----------------------------------------------------------------------------
+    //                          DAILY PERFORMANCE
+    // ----------------------------------------------------------------------------
+
+if showDailyPerformance
+
+    // DAILY PERFORMANCE CONTENTS
+    table.cell(performanceTable, 0, 0, "Performance: TODAY", bgcolor=color.teal, text_color=color.white, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(performanceTable, 1, 0, (todayPnL >= 0 ? "+" : "") + "$" + str.tostring(todayPnL, "#,###.##"), bgcolor = color.new(color.teal,75), text_color=todayPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 2, 0, (todayPnLPct >= 0 ? "+" : "") + str.tostring(todayPnLPct, "#.##") + "%", bgcolor = color.new(color.teal,75), text_color=todayPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+    if strategy.position_size > 0
+        table.cell(performanceTable, 0, 1, "Position: Long", bgcolor = color.green, text_color=color.white, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+        table.cell(performanceTable, 1, 1, (openPnL >= 0 ? "+" : "") + "$" + str.tostring(openPnL, "#,###.##"), text_color= openPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+        table.cell(performanceTable, 2, 1, (openPnLPct >= 0 ? "+" : "") + str.tostring(openPnLPct, "#,###.##") + "%", text_color= openPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+
+    else if strategy.position_size < 0
+        table.cell(performanceTable, 0, 1, "Position: Short", bgcolor = color.red, text_color=color.white, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+        table.cell(performanceTable, 1, 1, (openPnL >= 0 ? "+" : "") + "$" + str.tostring(openPnL, "#,###.##"), text_color= openPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+        table.cell(performanceTable, 2, 1, (openPnLPct >= 0 ? "+" : "") + str.tostring(openPnLPct, "#,###.##") + "%", text_color= openPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+    else
+        table.cell(performanceTable, 0, 1, "Position: Flat", bgcolor = color.black, text_color=color.white, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+        table.cell(performanceTable, 1, 1, "N/A", text_color = color.gray, text_size=size.normal, text_formatting = text.format_bold)
+        table.cell(performanceTable, 2, 1, "N/A", text_color = color.gray, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 0, 2, "Closed Trades", text_color=color.black, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(performanceTable, 1, 2, str.tostring(todayTrades), text_color=color.black, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 2, 2, todayTrades > 0 ? str.tostring(todayWinRate, "#.#") + "%" : "N/A", text_color=todayTrades > 0 ? todayWinColor : color.gray, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 0, 3, "Average Trade", text_color=color.black, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(performanceTable, 1, 3, (todayPnL >= 0 ? "+" : "") + "$" + str.tostring(todayAvgTrade, "#,###.##"), text_color=todayPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 2, 3, (todayPnLPct >= 0 ? "+" : "") + str.tostring(todayAvgTradePct, "#.##") + "%", text_color=todayPnLColor, text_size=size.normal, text_formatting = text.format_bold)  
+
+    // ----------------------------------------------------------------------------
+    //                          TOTAL PERFORMANCE
+    // ----------------------------------------------------------------------------
+
+if showAllPerformance
+
+    // ALL PERFORMANCE CONTENTS
+    table.cell(performanceTable, 0, 10, "Performance: TOTAL", bgcolor=color.blue, text_color=color.white, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(performanceTable, 1, 10, (totalPnL >= 0 ? "+" : "") + "$" + str.tostring(totalPnL, "#,###.##"), bgcolor = color.new(color.blue,75), text_color=totalPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 2, 10, (totalPnLPct >= 0 ? "+" : "") + str.tostring(totalPnLPct, "#.##") + "%", bgcolor = color.new(color.blue,75), text_color=totalPnLColor, text_size=size.normal, text_formatting = text.format_bold)    
+    table.cell(performanceTable, 0, 11, "Equity", text_color=color.black, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(performanceTable, 1, 11, "$" + str.tostring(strategy.equity, "#,###.##"), text_color=color.blue, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 2, 11, str.tostring(profitFactor, "#.##"), text_color=totalPnLColor, text_size=size.normal, text_formatting = text.format_bold)    
+    table.cell(performanceTable, 0, 12, "Total Trades", text_color=color.black, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(performanceTable, 1, 12, str.tostring(totalTrades), text_color=color.black, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 2, 12, totalTrades > 0 ? str.tostring(totalWinRate, "#.#") + "%" : "N/A", text_color=todayTrades > 0 ? totalWinColor : color.gray, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 0, 13, "Average Trade", text_color=color.black, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(performanceTable, 1, 13, (totalPnL >= 0 ? "+" : "") + "$" + str.tostring(totalAvgTrade, "#,###.##"), text_color=totalPnLColor, text_size=size.normal, text_formatting = text.format_bold)
+    table.cell(performanceTable, 2, 13, (totalPnLPct >= 0 ? "+" : "") + str.tostring(totalAvgTradePct, "#.##") + "%", text_color=totalPnLColor, text_size=size.normal, text_formatting = text.format_bold)    
+
+
+    // DEBUGGING
+    // table.cell(performanceTable, 0, 18, str.tostring(array.size(validSupLevels)), text_color=color.black, text_size=size.normal)
+    // table.cell(performanceTable, 1, 18, str.tostring(inTradingWindow), text_color=color.black, text_size=size.normal)
+    // table.cell(performanceTable, 2, 18, str.tostring(broke0930), text_color=color.black, text_size=size.normal)
+    // table.cell(performanceTable, 0, 19, str.tostring(entryPrice), text_color=color.black, text_size=size.normal)
+    // table.cell(performanceTable, 1, 19, str.tostring(entryPrice), text_color=color.black, text_size=size.normal)
+    // table.cell(performanceTable, 2, 19, str.tostring(entryPrice), text_color=color.black, text_size=size.normal)
+
+    // ----------------------------------------------------------------------------
+    //                          DEBUGGING TABLE
+    // ----------------------------------------------------------------------------
+
+// TABLE POSITION
+statTablePos = statTablePosition == OGV.table_position.topLeft ? position.top_left : 
+         statTablePosition == OGV.table_position.topRight ? position.top_right : 
+         statTablePosition == OGV.table_position.bottomLeft ? position.bottom_left :
+         position.bottom_right  
+ 
+// TABLE INITIALIZATION
+var table debugTable = table.new(statTablePos, 20, 20, bgcolor=color.white, frame_color = color.black, frame_width = 2, border_color = color.black,  border_width=2)
+
+if showDebugTable
+
+    // PLOTTING ALL TABLE VARIABLE AND BOOL STATES
+    table.cell(debugTable, 0, 0, "Debugging Table", bgcolor=color.teal, text_color=color.white, text_size=size.normal, text_halign = text.align_left, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 1,"ATR Calc", bgcolor = color.new(color.teal,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 1, str.tostring(daily_atr, "###.##"), bgcolor = color.new(color.teal,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 2,"Entry Level", bgcolor = color.new(color.teal,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 2, str.tostring(entryLevel, "###.##"), bgcolor = color.new(color.teal,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 3,"VWAP Value", bgcolor = color.new(color.lime,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 3, str.tostring(vwapVal, "###.##"), bgcolor = color.new(color.lime,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 4,"Sup Break Checks 1-2", bgcolor = color.new(color.blue,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 4, str.tostring(supBreakCheck1), bgcolor = color.new(color.blue,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 2, 4, str.tostring(supBreakCheck2), bgcolor = color.new(color.blue,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 5,"Broke Level Confirmed", bgcolor = color.new(color.blue,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 5, str.tostring(broke0930), bgcolor = color.new(color.blue,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 2, 5,"Break Bar", bgcolor = color.new(color.blue,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 3, 5, str.tostring(breakBar, "###.##"), bgcolor = color.new(color.blue,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 6,"Retest Checks 1-5", bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 6, str.tostring(retestCheck1), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 2, 6, str.tostring(retestCheck2), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 3, 6, str.tostring(retestCheck3), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 4, 6, str.tostring(retestCheck4), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 5, 6, str.tostring(retestCheck5), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 7,"Retest Checks 5-10", bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 7, str.tostring(retestCheck6), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 2, 7, str.tostring(retestCheck7), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 3, 7, str.tostring(retestCheck8), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 4, 7, str.tostring(retestCheck9), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 5, 7, str.tostring(retestCheck10), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 8,"Retest Confirmed", bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 8, str.tostring(retestOk), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 2, 8,"Retest Bar", bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 3, 8, str.tostring(retestBar, "###.##"), bgcolor = color.new(color.red,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 9,"Entry Canlde Checks 1-8", bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 9, str.tostring(entryCheck1), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 2, 9, str.tostring(entryCheck2), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 3, 9, str.tostring(entryCheck3), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 4, 9, str.tostring(entryCheck4), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 5, 9, str.tostring(entryCheck5), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 6, 9, str.tostring(entryCheck6), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 7, 9, str.tostring(entryCheck7), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 8, 9, str.tostring(entryCheck8), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 10,"Entry Confirmed", bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 10, str.tostring(enterShort), bgcolor = color.new(color.green,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 11,"Stop Loss Level", bgcolor = color.new(color.orange,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 11, str.tostring(stopLoss, "###.##"), bgcolor = color.new(color.orange,75), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 12,"Max Retest Distance", bgcolor = color.new(color.green,50), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 12, str.tostring(maxRetestDist), bgcolor = enterShort ? color.green : color.red, text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 0, 13,"Max Time Above VWAP", bgcolor = color.new(color.green,50), text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
+    table.cell(debugTable, 1, 13, str.tostring(vwapAboveMinCheck), bgcolor = vwapAboveMinCheck ? color.green : color.red, text_color=color.black, text_size=size.small, text_formatting = text.format_bold)
