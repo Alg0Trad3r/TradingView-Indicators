@@ -1,0 +1,93 @@
+// PURPORSE:    THIS INDICATOR ALLOWS THE USER TO VIEW KEY INFORMATION AND STATISTICTS
+//              ON HIGHER TIMEFRAME CHARTS, SPECIFICALLY 1-DAY CHARTS
+
+import forrestobnamia/OGV_Library/28 as OGV
+
+//@version=6
+indicator("Daily Gap Tracker", overlay = true, max_labels_count = 500)
+
+// ────────────────────────────────────────────── INPUTS
+atrLength       = input.int(14, "ATR Period", minval = 1, display = display.none)
+minGapFilter    = input.float(0.10, "Min Gap % to Show", minval = 0.0, step = 0.05, display = display.none)
+showOnlyToday   = input.bool(true, "Show Only Today", tooltip = "Uncheck to show last 10 days", display = display.none)
+tablePosInput   = input.string("Top Right", "Table Position",
+                  options = ["Top Left", "Top Center", "Top Right",
+                             "Bottom Left", "Bottom Center", "Bottom Right"], display = display.none)
+
+// ────────────────────────────────────────────── TABLE POSITION (YOUR EXACT STYLE)
+tablePosition = tablePosInput == "Top Left"     ? position.top_left     :
+ tablePosInput == "Top Center"   ? position.top_center   :
+ tablePosInput == "Top Right"    ? position.top_right    :
+ tablePosInput == "Bottom Left"  ? position.bottom_left  :
+ tablePosInput == "Bottom Center"? position.bottom_center:
+  position.bottom_right
+
+var table gapTable = table.new(tablePosition, columns = 9, rows = 30,
+                               bgcolor = color.new(#1e1e1e, 0), border_width = 1, frame_color = color.gray)
+
+// ────────────────────────────────────────────── ROBUST DAILY RESET (OGV METHOD — NO PRE/POST LOGIC)
+var int  lastTradingDay = na
+int      currentTradingDay = dayofmonth(time("D"))
+
+bool     crossedNewDay = na(lastTradingDay) or currentTradingDay != lastTradingDay
+var bool dailyResetDone = false
+
+bool     newDay = crossedNewDay and not dailyResetDone
+
+if newDay
+    dailyResetDone := true
+    lastTradingDay := currentTradingDay
+
+// Reset the flag at the start of a new calendar day
+if dayofmonth != dayofmonth[1]
+    dailyResetDone := false
+
+// ────────────────────────────────────────────── CLEAR & REBUILD TABLE ON NEW DAY
+if newDay
+    table.clear(gapTable, start_row = 0, start_column = 0)
+
+// ────────────────────────────────────────────── TODAY'S DATA
+prevClose = request.security(syminfo.tickerid, "D", close[1])
+todayOpen = request.security(syminfo.tickerid, "D", open)
+atrToday  = math.round(request.security(syminfo.tickerid, "1D", ta.atr(atrLength)[1], lookahead = barmerge.lookahead_on), 2)
+
+gapPoints   = todayOpen - prevClose
+gapPctPrice = prevClose != 0 ? (gapPoints / prevClose) * 100 : 0.0
+gapPctATR   = atrToday != 0 ? (math.abs(gapPoints) / atrToday) * 100 : 0.0
+showToday   = math.abs(gapPctPrice) >= minGapFilter or not showOnlyToday
+
+// ────────────────────────────────────────────── HISTORICAL DATA
+// histClose = request.security(syminfo.tickerid, "D", close[2])
+// histOpen = request.security(syminfo.tickerid, "D", open) 
+// histATR = request.security(syminfo.tickerid, "D", ta.atr(atrLength))
+// histTime = request.security(syminfo.tickerid, "D", time)
+
+// ────────────────────────────────────────────── BUILD TABLE (YOUR CLEAN STYLE — NO ROW COUNTER!)
+
+// Header
+table.cell(gapTable, 0, 0, "DAILY GAP TRACKER", bgcolor = color.new(#113366, 0), 
+ text_color = color.yellow, text_size = size.large, text_formatting = text.format_bold)
+table.cell(gapTable, 0, 1, syminfo.ticker + " • " + str.format("{0,date,MMM dd yyyy}", time), 
+ text_color = color.white, text_size = size.small)
+
+// Column Headers
+table.cell(gapTable, 0, 3, "Date",      bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_size = size.small, text_formatting = text.format_bold)
+table.cell(gapTable, 1, 3, "Dir",       bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_size = size.small, text_formatting = text.format_bold)
+table.cell(gapTable, 2, 3, "Previous Close Price", bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_size = size.small, text_formatting = text.format_bold)
+table.cell(gapTable, 3, 3, "Open Price", bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_size = size.small, text_formatting = text.format_bold)
+table.cell(gapTable, 4, 3, "Points",    bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_size = size.small, text_formatting = text.format_bold)
+table.cell(gapTable, 5, 3, "% Price",   bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_size = size.small, text_formatting = text.format_bold)
+table.cell(gapTable, 6, 3, "% ATR(14)", bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_size = size.small, text_formatting = text.format_bold)
+table.cell(gapTable, 7, 3, "ATR", bgcolor = color.new(#2d4a73, 70), text_color = color.orange, text_formatting = text.format_bold) 
+
+// Today's Gap
+if showToday
+    color bgToday = gapPoints > 0 ? color.new(#30bf35, 80) : color.new(#ba1a1a, 81)
+    table.cell(gapTable, 0, 4, str.format("{0,date,MMM dd}", time),         bgcolor = bgToday, text_color = color.white)
+    table.cell(gapTable, 1, 4, gapPoints > 0 ? "UP" : gapPoints < 0 ? "DOWN" : "FLAT", bgcolor = bgToday, text_color = color.white, text_formatting = text.format_bold)
+    table.cell(gapTable, 2, 4, str.tostring(prevClose, "0000.00"), bgcolor = bgToday, text_color = color.white)
+    table.cell(gapTable, 3, 4, str.tostring(todayOpen, "0000.00"), bgcolor = bgToday, text_color = color.white)
+    table.cell(gapTable, 4, 4, str.tostring(gapPoints, "00.00"), bgcolor = bgToday, text_color = color.white)
+    table.cell(gapTable, 5, 4, str.tostring(gapPctPrice, "00.00"), bgcolor = bgToday, text_color = color.white)
+    table.cell(gapTable, 6, 4, str.tostring(gapPctATR,"00.00"), bgcolor = bgToday, text_color = color.white, text_formatting = text.format_bold)
+    table.cell(gapTable, 7, 4, str.tostring(atrToday, "00.00"), bgcolor = bgToday, text_color = color.white, text_formatting = text.format_bold)
